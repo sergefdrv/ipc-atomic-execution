@@ -40,7 +40,7 @@ impl State {
             network_name: SubnetID::from_str(&params.network_name)?,
             atomic_exec_registry: TCid::new_hamt(store)?,
             nonce: Default::default(),
-            ipc_gateway_address: Address::from_bytes(&params.ipc_gateway_address)?,
+            ipc_gateway_address: params.ipc_gateway_address,
         })
     }
 

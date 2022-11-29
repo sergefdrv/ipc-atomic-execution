@@ -1,9 +1,10 @@
 use fvm_ipld_encoding::tuple::{Deserialize_tuple, Serialize_tuple};
+use fvm_shared::address::Address;
 use ipc_gateway::{StorableMsg, SubnetID};
 
 #[derive(Serialize_tuple, Deserialize_tuple)]
 pub struct ConstructorParams {
-    pub ipc_gateway_address: Vec<u8>,
+    pub ipc_gateway_address: Address,
     pub network_name: String,
 }
 
