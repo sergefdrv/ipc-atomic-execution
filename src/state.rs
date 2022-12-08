@@ -21,6 +21,7 @@ pub struct State {
 }
 impl Cbor for State {}
 
+// TODO: Use hash/CID as the key?
 type RegistryCid = TCid<THamt<RegistryKey, RegistryEntry>>;
 type RegistryEntry = HashMap<IPCAddress, MethodNum>;
 
