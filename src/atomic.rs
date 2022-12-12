@@ -264,7 +264,7 @@ impl AtomicExecRegistry {
         let unlocked_state_cids = state.into_iter().try_fold(Vec::new(), |mut v, s| {
             if lock {
                 s.lock()?;
-            } else {
+            } else if !s.is_locked() {
                 v.push(s.cid());
             }
             anyhow::Ok(v)
