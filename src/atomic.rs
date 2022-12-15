@@ -46,7 +46,7 @@ fn cid_from_cbor(obj: &impl Cbor) -> Cid {
 /// It can be either incorporated into other data structure, or
 /// referred to by its CID. In the latter case, it is user's
 /// responsibility to flush to and load from the blockstore.
-#[derive(Debug, Serialize_tuple, Deserialize_tuple)]
+#[derive(Debug, Clone, Serialize_tuple, Deserialize_tuple)]
 pub struct AtomicInputState<T>
 where
     T: Serialize + DeserializeOwned,
@@ -87,6 +87,17 @@ impl<T: Serialize + DeserializeOwned> AtomicInputState<T> {
         let cid = bs.put_cbor(&self, Code::Blake2b256)?;
         self.cid.set(Some(cid)); // cache computed CID
         Ok(cid)
+    }
+
+    /// Returns a shared reference to the inner content.
+    pub fn get(&self) -> &T {
+        &self.state
+    }
+
+    /// Attempts to set the inner content; fails if the state is
+    /// locked.
+    pub fn set(&mut self, state: T) -> anyhow::Result<()> {
+        self.modify(|s| Ok(*s = state))
     }
 
     /// Attempts to get a mutable reference to the inner content;
