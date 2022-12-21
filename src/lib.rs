@@ -84,7 +84,7 @@ impl Actor {
         }
 
         let msgs = rt.transaction(|st: &mut State, rt| {
-            st.modify_atomic_exec(rt.store(), exec_id.into(), actors.clone(), |entry| {
+            st.modify_atomic_exec(rt.store(), exec_id.clone(), actors.clone(), |entry| {
                 // Record the pre-commitment
                 entry.insert(from, params.commit);
 
@@ -102,7 +102,7 @@ impl Actor {
                         msg: StorableMsg {
                             to: addr.to_owned(),
                             method,
-                            params: exec_id.to_bytes().into(),
+                            params: exec_id.clone(),
                             ..Default::default()
                         },
                         wrapped: true,
@@ -129,7 +129,7 @@ impl Actor {
 
                 // Remove the atomic execution entry
                 rt.transaction(|st: &mut State, rt| {
-                    st.rm_atomic_exec(rt.store(), *exec_id, actors.clone())
+                    st.rm_atomic_exec(rt.store(), exec_id.clone(), actors.clone())
                         .map_err(|e| {
                             e.downcast_default(
                                 ExitCode::USR_ILLEGAL_STATE,
@@ -178,7 +178,7 @@ impl Actor {
         }
 
         let msg = rt.transaction(|st: &mut State, rt| {
-            st.modify_atomic_exec(rt.store(), exec_id.into(), actors.clone(), |entry| {
+            st.modify_atomic_exec(rt.store(), exec_id.clone(), actors.clone(), |entry| {
                 // Remove the pre-commitment
                 entry.remove_entry(&from);
 
@@ -187,7 +187,7 @@ impl Actor {
                     msg: StorableMsg {
                         to: from,
                         method: params.rollback,
-                        params: exec_id.to_bytes().into(),
+                        params: exec_id.clone(),
                         ..Default::default()
                     },
                     wrapped: true,

@@ -1,6 +1,5 @@
 // Copyright: ConsensusLab
 //
-use cid::Cid;
 use fvm_ipld_blockstore::Blockstore;
 use fvm_ipld_encoding::Cbor;
 use fvm_ipld_hamt::BytesKey;
@@ -12,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use std::collections::{HashMap, HashSet};
 
-use crate::ConstructorParams;
+use crate::{AtomicExecID, ConstructorParams};
 
 #[derive(Serialize, Deserialize)]
 pub struct State {
@@ -27,7 +26,7 @@ type RegistryEntry = HashMap<IPCAddress, MethodNum>;
 
 #[derive(Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
 pub struct RegistryKey {
-    exec_id: Cid,
+    exec_id: AtomicExecID,
     actors: HashSet<IPCAddress>,
 }
 impl Cbor for RegistryKey {}
@@ -45,7 +44,7 @@ impl State {
     pub fn modify_atomic_exec<BS: Blockstore, R>(
         &mut self,
         store: &BS,
-        exec_id: Cid,
+        exec_id: AtomicExecID,
         actors: HashSet<IPCAddress>,
         f: impl FnOnce(&mut HashMap<IPCAddress, MethodNum>) -> anyhow::Result<R>,
     ) -> anyhow::Result<R> {
@@ -65,7 +64,7 @@ impl State {
     pub fn rm_atomic_exec<BS: Blockstore>(
         &mut self,
         store: &BS,
-        exec_id: Cid,
+        exec_id: AtomicExecID,
         actors: HashSet<IPCAddress>,
     ) -> anyhow::Result<()> {
         let k = BytesKey::from(RegistryKey { exec_id, actors }.marshal_cbor()?);

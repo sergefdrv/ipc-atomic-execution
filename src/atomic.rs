@@ -97,7 +97,10 @@ impl<T: Serialize + DeserializeOwned> AtomicInputState<T> {
     /// Attempts to set the inner content; fails if the state is
     /// locked.
     pub fn set(&mut self, state: T) -> anyhow::Result<()> {
-        self.modify(|s| Ok(*s = state))
+        self.modify(|s| {
+            *s = state;
+            Ok(())
+        })
     }
 
     /// Attempts to get a mutable reference to the inner content;
@@ -299,6 +302,17 @@ impl AtomicExecRegistry {
         Ok(input_id)
     }
 
+    pub fn atomic_input(
+        &self,
+        bs: &impl Blockstore,
+        input_id: &AtomicInputID,
+    ) -> anyhow::Result<Option<AtomicInput>> {
+        let k = BytesKey::from(input_id.bytes());
+        let input_ids = self.input_ids.load(bs)?;
+        let input = input_ids.get(&k)?.map(|e| e.input.clone());
+        Ok(input)
+    }
+
     /// Consumes and discards the supplied atomic execution input ID.
     ///
     /// This cancels the associated initiated instance of the atomic
@@ -316,27 +330,24 @@ impl AtomicExecRegistry {
         &mut self,
         bs: &impl Blockstore,
         input_id: AtomicInputID,
-        input_fn: impl FnOnce(AtomicInput) -> Box<dyn Iterator<Item = &'a mut S>>,
+        state: impl IntoIterator<Item = &'a mut S>,
     ) -> anyhow::Result<()>
     where
         S: LockableState + 'a,
     {
         // Consume own input ID and retrieve the associated data
-        let AtomicInputEntry { input, .. } = self.input_ids.modify(bs, |m| {
-            let k = BytesKey::from(input_id.bytes());
-            let (_, v) = m
-                .delete(&k)?
-                .ok_or_else(|| anyhow::anyhow!("unexpected input ID"))?;
-            Ok(v)
+        let k = BytesKey::from(input_id.bytes());
+        self.input_ids.modify(bs, |m| {
+            m.delete(&k)?
+                .ok_or_else(|| anyhow::anyhow!("unexpected input ID"))
         })?;
 
         // Get the state and ensure it's unlocked
-        let state_iter = input_fn(input);
-        state_iter.for_each(|s| {
+        for s in state {
             if s.is_locked() {
                 s.unlock().unwrap();
             }
-        });
+        }
 
         Ok(())
     }
@@ -361,15 +372,13 @@ impl AtomicExecRegistry {
     /// The supplied closure `output_fn` receives the data
     /// interpretation returned by `input_fn` and returns any data to
     /// associate with the returned atomic execution ID.
-    pub fn prepare_atomic_exec<'a, S, I>(
+    pub fn prepare_atomic_exec<'a, S>(
         &mut self,
         bs: &impl Blockstore,
-        own_input_id: AtomicInputID,
+        own_input_id: &AtomicInputID,
         input_ids: &HashMap<IPCAddress, AtomicInputID>,
-        input_fn: impl FnOnce(
-            AtomicInput,
-        ) -> anyhow::Result<(I, Box<dyn Iterator<Item = &'a mut S> + 'a>)>,
-        output_fn: impl FnOnce(I) -> anyhow::Result<AtomicOutput>,
+        state: impl IntoIterator<Item = &'a mut S>,
+        output: AtomicOutput,
     ) -> anyhow::Result<AtomicExecID>
     where
         S: 'a + LockableState,
@@ -377,7 +386,7 @@ impl AtomicExecRegistry {
         // Consume own input ID and retrieve the associated data
         let AtomicInputEntry {
             unlocked_state_cids,
-            input,
+            input: _,
         } = self.input_ids.modify(bs, |m| {
             let k = BytesKey::from(own_input_id.bytes());
             let (_, v) = m
@@ -386,10 +395,8 @@ impl AtomicExecRegistry {
             Ok(v)
         })?;
 
-        // Get the input and the state; check that the state has not
-        // changed and ensure it is locked
-        let (input, state_iter) = input_fn(input)?;
-        let unlocked_state_cid_iter = state_iter.filter(|s| !s.is_locked()).map(|s| {
+        // Check that the unlocked state has not changed and lock it
+        let unlocked_state_cid_iter = state.into_iter().filter(|s| !s.is_locked()).map(|s| {
             let cid = s.cid();
             s.lock().unwrap();
             cid
@@ -398,18 +405,27 @@ impl AtomicExecRegistry {
             anyhow::bail!("state CID mismatch");
         }
 
-        // Compute the atomic execution ID; produce and store the
-        // output
+        // Compute the atomic execution ID and store the output
         let exec_id = Self::compute_exec_id(input_ids);
         self.exec_ids.modify(bs, |m| {
             let k = BytesKey::from(exec_id.bytes());
-            let output = output_fn(input)?;
             let v = m.set(k, AtomicOutputEntry { output })?;
             assert!(v.is_none(), "exec ID collision");
             Ok(())
         })?;
 
         Ok(exec_id)
+    }
+
+    pub fn atomic_output(
+        &self,
+        bs: &impl Blockstore,
+        exec_id: &AtomicExecID,
+    ) -> anyhow::Result<Option<AtomicOutput>> {
+        let k = BytesKey::from(exec_id.bytes());
+        let exec_ids = self.exec_ids.load(bs)?;
+        let output = exec_ids.get(&k)?.map(|e| e.output.clone());
+        Ok(output)
     }
 
     /// Consumes the supplied atomic execution ID and commits the
@@ -425,18 +441,17 @@ impl AtomicExecRegistry {
     /// The supplied closure `apply_fn` receives the data
     /// interpretation returned by `output_fn` in order to merge it
     /// into the actor state.
-    pub fn commit_atomic_exec<'a, S, O, R>(
+    pub fn commit_atomic_exec<'a, S>(
         &mut self,
         bs: &impl Blockstore,
         exec_id: AtomicExecID,
-        output_fn: impl FnOnce(AtomicOutput) -> (O, Box<dyn Iterator<Item = &'a mut S>>),
-        apply_fn: impl FnOnce(O) -> anyhow::Result<R>,
-    ) -> anyhow::Result<R>
+        state: impl IntoIterator<Item = &'a mut S>,
+    ) -> anyhow::Result<()>
     where
         S: 'a + LockableState,
     {
-        // Consume the atomic exec ID and retrieve the associated data
-        let AtomicOutputEntry { output } = self.exec_ids.modify(bs, |m| {
+        // Consume the atomic exec ID
+        self.exec_ids.modify(bs, |m| {
             let k = BytesKey::from(exec_id.bytes());
             let (_, v) = m
                 .delete(&k)?
@@ -445,12 +460,11 @@ impl AtomicExecRegistry {
         })?;
 
         // Get the output and the state; unlock the state
-        let (output, state_iter) = output_fn(output);
-        state_iter.for_each(|s| s.unlock().unwrap());
+        for s in state {
+            s.unlock().unwrap()
+        }
 
-        // Apply the output and return the result
-        let res = apply_fn(output)?;
-        Ok(res)
+        Ok(())
     }
 
     /// Consumes the supplied atomic execution ID and rolls the atomic
@@ -462,18 +476,17 @@ impl AtomicExecRegistry {
     /// The supplied closure `rollback_fn` receives the data
     /// interpretation returned by `output_fn` and can be used to
     /// revert any additional changes made to the actor state.
-    pub fn rollback_atomic_exec<'a, S, O>(
+    pub fn rollback_atomic_exec<'a, S>(
         &mut self,
         bs: &impl Blockstore,
         exec_id: AtomicExecID,
-        output_fn: impl FnOnce(AtomicOutput) -> (O, Box<dyn Iterator<Item = &'a mut S>>),
-        rollback_fn: impl FnOnce(O),
+        state: impl IntoIterator<Item = &'a mut S>,
     ) -> anyhow::Result<()>
     where
         S: 'a + LockableState,
     {
-        // Consume the atomic exec Id and retrieve let associated data
-        let AtomicOutputEntry { output } = self.exec_ids.modify(bs, |m| {
+        // Consume the atomic exec ID
+        self.exec_ids.modify(bs, |m| {
             let k = BytesKey::from(exec_id.bytes());
             let (_, v) = m
                 .delete(&k)?
@@ -481,12 +494,10 @@ impl AtomicExecRegistry {
             Ok(v)
         })?;
 
-        // Get and unlock the state
-        let (output, state_iter) = output_fn(output);
-        state_iter.for_each(|s| s.unlock().unwrap());
-
-        // Rollback using the output
-        rollback_fn(output);
+        // Unlock the state
+        for s in state {
+            s.unlock().unwrap();
+        }
 
         Ok(())
     }

@@ -4,7 +4,7 @@ use fvm_ipld_blockstore::Blockstore;
 use fvm_ipld_encoding::{Cbor, RawBytes};
 use fvm_ipld_hamt::BytesKey;
 use fvm_primitives::{TCid, THamt};
-use fvm_shared::{bigint::Zero, econ::TokenAmount, ActorID, HAMT_BIT_WIDTH};
+use fvm_shared::{address::Address, bigint::Zero, econ::TokenAmount, ActorID, HAMT_BIT_WIDTH};
 use integer_encoding::VarInt;
 use ipc_atomic_execution::{AtomicExecID, AtomicExecRegistry, AtomicInputID, AtomicInputState};
 use ipc_gateway::IPCAddress;
@@ -15,6 +15,9 @@ pub type AccountState = AtomicInputState<TokenAmount>;
 
 #[derive(Serialize, Deserialize)]
 pub struct State {
+    ipc_gateway: Address,
+    ipc_address: IPCAddress,
+    atomic_exec_coordinator: IPCAddress,
     name: String,
     symbol: String,
     total: TokenAmount,
@@ -26,6 +29,9 @@ impl Cbor for State {}
 impl State {
     pub fn new(
         bs: &impl Blockstore,
+        ipc_gateway: Address,
+        ipc_address: IPCAddress,
+        atomic_exec_coordinator: IPCAddress,
         name: String,
         symbol: String,
         balances: impl IntoIterator<Item = (ActorID, TokenAmount)>,
@@ -41,6 +47,9 @@ impl State {
             }
         }
         Ok(Self {
+            ipc_gateway,
+            ipc_address,
+            atomic_exec_coordinator,
             name,
             symbol,
             total,
@@ -49,13 +58,17 @@ impl State {
         })
     }
 
-    // pub fn load(bs: &impl Blockstore, cid: &Cid) -> anyhow::Result<Option<Self>> {
-    //     bs.get_cbor(cid)
-    // }
+    pub fn ipc_gateway(&self) -> Address {
+        self.ipc_gateway
+    }
 
-    // pub fn flush(&self, bs: &mut impl Blockstore) -> anyhow::Result<Cid> {
-    //     bs.put_cbor(self, Code::Blake2b256)
-    // }
+    pub fn ipc_address(&self) -> &IPCAddress {
+        &self.ipc_address
+    }
+
+    pub fn atomic_exec_coordinator(&self) -> &IPCAddress {
+        &self.atomic_exec_coordinator
+    }
 
     pub fn name(&self) -> &str {
         &self.name
@@ -138,59 +151,93 @@ impl State {
         Ok(input_id)
     }
 
+    pub fn cancel_atomic_transfer(
+        &mut self,
+        bs: &impl Blockstore,
+        input_id: AtomicInputID,
+    ) -> anyhow::Result<()> {
+        let atomic_registry = &mut self.atomic_registry;
+        let input = atomic_registry
+            .atomic_input(bs, &input_id)?
+            .ok_or_else(|| anyhow::anyhow!("unexpected own input ID"))?;
+        let AtomicTransfer { from, .. } = input.deserialize()?;
+        let from_key = Self::account_key(from);
+        let mut balances = self.balances.load(bs)?;
+        let mut from_state = balances.get(&from_key)?.cloned().unwrap_or_default();
+        atomic_registry.cancel_atomic_exec(bs, input_id, std::iter::once(&mut from_state))?;
+        balances.set(from_key, from_state)?;
+        self.balances.flush(balances)?;
+        Ok(())
+    }
+
     pub fn prep_atomic_transfer(
         &mut self,
         bs: &impl Blockstore,
-        own_input_id: AtomicInputID,
         input_ids: &HashMap<IPCAddress, AtomicInputID>,
     ) -> anyhow::Result<AtomicExecID> {
+        let own_input_id = input_ids
+            .get(self.ipc_address())
+            .ok_or_else(|| anyhow::anyhow!("missing own input ID"))?;
         let atomic_registry = &mut self.atomic_registry;
+        let input = atomic_registry
+            .atomic_input(bs, &own_input_id)?
+            .ok_or_else(|| anyhow::anyhow!("unexpected own input ID"))?;
+        let AtomicTransfer { from, .. } = input.deserialize()?;
+        let from_key = Self::account_key(from);
         let mut balances = self.balances.load(bs)?;
-        let mut from_key = None;
-        let mut from_state = None;
+        let mut from_state = balances.get(&from_key)?.cloned().unwrap_or_default();
         let exec_id = atomic_registry.prepare_atomic_exec(
             bs,
-            own_input_id,
+            &own_input_id,
             input_ids,
-            |input| {
-                let AtomicTransfer { from, .. } = RawBytes::deserialize(&input)?;
-                from_key = Some(Self::account_key(from));
-                from_state = Some(
-                    balances
-                        .get(from_key.as_ref().unwrap())?
-                        .cloned()
-                        .unwrap_or_default(),
-                );
-
-                Ok((input, Box::new(from_state.as_mut().into_iter())))
-            },
-            |input| Ok(input),
+            std::iter::once(&mut from_state),
+            input,
         )?;
 
-        balances.set(from_key.unwrap(), from_state.unwrap())?;
+        balances.set(from_key, from_state)?;
         self.balances.flush(balances)?;
 
         Ok(exec_id)
     }
 
-    // fn account_state(&self, bs: &impl Blockstore, id: ActorID) -> anyhow::Result<AccountState> {
-    //     Ok(self
-    //         .balances
-    //         .load(bs)?
-    //         .get(&Self::account_key(id))?
-    //         .cloned()
-    //         .unwrap_or_default())
-    // }
+    pub fn commit_atomic_transfer(
+        &mut self,
+        bs: &impl Blockstore,
+        exec_id: AtomicExecID,
+    ) -> anyhow::Result<()> {
+        let atomic_registry = &mut self.atomic_registry;
+        let output = atomic_registry
+            .atomic_output(bs, &exec_id)?
+            .ok_or_else(|| anyhow::anyhow!("unexpected exec ID"))?;
+        let AtomicTransfer { from, to, amount } = output.deserialize()?;
+        let from_key = Self::account_key(from);
+        let mut balances = self.balances.load(bs)?;
+        let mut from_state = balances.get(&from_key)?.cloned().unwrap_or_default();
+        atomic_registry.commit_atomic_exec(bs, exec_id, std::iter::once(&mut from_state))?;
+        balances.set(from_key, from_state)?;
+        self.balances.flush(balances)?;
+        self.transfer(bs, from, to, amount)?;
+        Ok(())
+    }
 
-    // fn set_account_state(
-    //     &mut self,
-    //     bs: &impl Blockstore,
-    //     id: ActorID,
-    //     s: AccountState,
-    // ) -> anyhow::Result<Option<AccountState>> {
-    //     self.balances
-    //         .modify(bs, |m| Ok(m.set(Self::account_key(id), s)?))
-    // }
+    pub fn rollback_atomic_transfer(
+        &mut self,
+        bs: &impl Blockstore,
+        exec_id: AtomicExecID,
+    ) -> anyhow::Result<()> {
+        let atomic_registry = &mut self.atomic_registry;
+        let output = atomic_registry
+            .atomic_output(bs, &exec_id)?
+            .ok_or_else(|| anyhow::anyhow!("unexpected exec ID"))?;
+        let AtomicTransfer { from, .. } = output.deserialize()?;
+        let from_key = Self::account_key(from);
+        let mut balances = self.balances.load(bs)?;
+        let mut from_state = balances.get(&from_key)?.cloned().unwrap_or_default();
+        atomic_registry.rollback_atomic_exec(bs, exec_id, std::iter::once(&mut from_state))?;
+        balances.set(from_key, from_state)?;
+        self.balances.flush(balances)?;
+        Ok(())
+    }
 
     fn account_key(id: ActorID) -> BytesKey {
         BytesKey::from(id.encode_var_vec())
