@@ -46,7 +46,7 @@ fn cid_from_cbor(obj: &impl Cbor) -> Cid {
 /// It can be either incorporated into other data structure, or
 /// referred to by its CID. In the latter case, it is user's
 /// responsibility to flush to and load from the blockstore.
-#[derive(Debug, Clone, Serialize_tuple, Deserialize_tuple)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize_tuple, Deserialize_tuple)]
 pub struct AtomicInputState<T>
 where
     T: Serialize + DeserializeOwned,
@@ -265,7 +265,7 @@ impl AtomicExecRegistry {
         &mut self,
         bs: &impl Blockstore,
         state: impl IntoIterator<Item = &'a mut S>,
-        input: AtomicInput,
+        input: AtomicInput, // TODO: Serializable
         lock: bool,
     ) -> anyhow::Result<AtomicInputID>
     where
@@ -366,7 +366,9 @@ impl AtomicExecRegistry {
         bs: &impl Blockstore,
         own_input_id: AtomicInputID,
         input_ids: &HashMap<IPCAddress, AtomicInputID>,
-        input_fn: impl FnOnce(AtomicInput) -> (I, Box<dyn Iterator<Item = &'a mut S>>),
+        input_fn: impl FnOnce(
+            AtomicInput,
+        ) -> anyhow::Result<(I, Box<dyn Iterator<Item = &'a mut S> + 'a>)>,
         output_fn: impl FnOnce(I) -> anyhow::Result<AtomicOutput>,
     ) -> anyhow::Result<AtomicExecID>
     where
@@ -386,7 +388,7 @@ impl AtomicExecRegistry {
 
         // Get the input and the state; check that the state has not
         // changed and ensure it is locked
-        let (input, state_iter) = input_fn(input);
+        let (input, state_iter) = input_fn(input)?;
         let unlocked_state_cid_iter = state_iter.filter(|s| !s.is_locked()).map(|s| {
             let cid = s.cid();
             s.lock().unwrap();
