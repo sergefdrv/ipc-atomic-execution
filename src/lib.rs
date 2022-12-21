@@ -10,7 +10,7 @@ use ipc_gateway::{ApplyMsgParams, CrossMsg, StorableMsg};
 use num_derive::FromPrimitive;
 use num_traits::{FromPrimitive, Zero};
 
-pub use crate::atomic::{AtomicExecID, AtomicInput, AtomicInputID, AtomicOutput};
+pub use crate::atomic::{AtomicExecID, AtomicInputID};
 pub use crate::atomic::{AtomicExecRegistry, AtomicInputState, LockableState};
 pub use crate::types::{ConstructorParams, PreCommitParams, RevokeParams};
 

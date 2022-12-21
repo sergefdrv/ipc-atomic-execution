@@ -180,14 +180,8 @@ impl<T: Default + Serialize + DeserializeOwned> Default for AtomicInputState<T> 
     }
 }
 
-/// Arbitrary data associated with an atomic execution input.
-pub type AtomicInput = RawBytes;
-
 /// Concise identifier of an atomic execution input.
 pub type AtomicInputID = RawBytes;
-
-/// Arbitrary data associated with an atomic execution ID.
-pub type AtomicOutput = RawBytes;
 
 /// Concise identifier of an atomic execution instance.
 pub type AtomicExecID = RawBytes;
@@ -198,14 +192,14 @@ type AtomicExecNonce = u64;
 #[derive(Debug, PartialEq, Serialize_tuple, Deserialize_tuple)]
 struct AtomicInputEntry {
     unlocked_state_cids: Vec<Cid>,
-    input: AtomicInput,
+    input: RawBytes,
 }
 impl Cbor for AtomicInputEntry {}
 
 /// Internal state associated with an atomic execution ID.
 #[derive(Debug, PartialEq, Serialize_tuple, Deserialize_tuple)]
 struct AtomicOutputEntry {
-    output: AtomicOutput,
+    output: RawBytes,
 }
 
 /// Registry of atomic execution instances.
@@ -264,15 +258,16 @@ impl AtomicExecRegistry {
     /// [`prepare_atomic_exec`](Self::prepare_atomic_exec). In that
     /// case, the caller is responsible for flushing the supplied
     /// lockable state to the blockstore.
-    pub fn init_atomic_exec<'a, S>(
+    pub fn init_atomic_exec<'a, S, I>(
         &mut self,
         bs: &impl Blockstore,
         state: impl IntoIterator<Item = &'a mut S>,
-        input: AtomicInput, // TODO: Serializable
+        input: I,
         lock: bool,
     ) -> anyhow::Result<AtomicInputID>
     where
         S: LockableState + 'a,
+        I: Serialize,
     {
         // Optionally lock the state and compute its CIDs
         let unlocked_state_cids = state.into_iter().try_fold(Vec::new(), |mut v, s| {
@@ -285,6 +280,7 @@ impl AtomicExecRegistry {
         })?;
 
         // Generate and register a new input ID
+        let input = RawBytes::serialize(&input)?;
         let input_id = self.new_input_id(&unlocked_state_cids, &input);
         self.input_ids.modify(bs, |m| {
             let k = BytesKey::from(input_id.bytes());
@@ -302,14 +298,20 @@ impl AtomicExecRegistry {
         Ok(input_id)
     }
 
-    pub fn atomic_input(
+    pub fn atomic_input<I>(
         &self,
         bs: &impl Blockstore,
         input_id: &AtomicInputID,
-    ) -> anyhow::Result<Option<AtomicInput>> {
+    ) -> anyhow::Result<Option<I>>
+    where
+        I: DeserializeOwned,
+    {
         let k = BytesKey::from(input_id.bytes());
         let input_ids = self.input_ids.load(bs)?;
-        let input = input_ids.get(&k)?.map(|e| e.input.clone());
+        let input = input_ids
+            .get(&k)?
+            .map(|e| e.input.deserialize())
+            .transpose()?;
         Ok(input)
     }
 
@@ -372,16 +374,17 @@ impl AtomicExecRegistry {
     /// The supplied closure `output_fn` receives the data
     /// interpretation returned by `input_fn` and returns any data to
     /// associate with the returned atomic execution ID.
-    pub fn prepare_atomic_exec<'a, S>(
+    pub fn prepare_atomic_exec<'a, S, O>(
         &mut self,
         bs: &impl Blockstore,
         own_input_id: &AtomicInputID,
         input_ids: &HashMap<IPCAddress, AtomicInputID>,
         state: impl IntoIterator<Item = &'a mut S>,
-        output: AtomicOutput,
+        output: O,
     ) -> anyhow::Result<AtomicExecID>
     where
         S: 'a + LockableState,
+        O: Serialize,
     {
         // Consume own input ID and retrieve the associated data
         let AtomicInputEntry {
@@ -409,6 +412,7 @@ impl AtomicExecRegistry {
         let exec_id = Self::compute_exec_id(input_ids);
         self.exec_ids.modify(bs, |m| {
             let k = BytesKey::from(exec_id.bytes());
+            let output = RawBytes::serialize(output)?;
             let v = m.set(k, AtomicOutputEntry { output })?;
             assert!(v.is_none(), "exec ID collision");
             Ok(())
@@ -417,14 +421,20 @@ impl AtomicExecRegistry {
         Ok(exec_id)
     }
 
-    pub fn atomic_output(
+    pub fn atomic_output<O>(
         &self,
         bs: &impl Blockstore,
         exec_id: &AtomicExecID,
-    ) -> anyhow::Result<Option<AtomicOutput>> {
+    ) -> anyhow::Result<Option<O>>
+    where
+        O: DeserializeOwned,
+    {
         let k = BytesKey::from(exec_id.bytes());
         let exec_ids = self.exec_ids.load(bs)?;
-        let output = exec_ids.get(&k)?.map(|e| e.output.clone());
+        let output = exec_ids
+            .get(&k)?
+            .map(|e| e.output.deserialize())
+            .transpose()?;
         Ok(output)
     }
 
